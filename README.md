@@ -1,6 +1,8 @@
 # Kowloon DebugDraw
 
-Debug draw package used by Kowloon project.
+### Debug draw package used by Kowloon project
+
+![Capsules](images/capsules.png)
 
 ### Goals
 - High performance draw commands to have minimal impact on frame time even when issuing tens to hundreds of thousands commands a frame.
