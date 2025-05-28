@@ -3,6 +3,7 @@
 ### Debug draw package used by Kowloon project
 
 ![Capsules](images/capsules.png)
+65,536 capsule debug draw commands in 2ms.
 
 ### Goals
 - High performance draw commands to have minimal impact on frame time even when issuing tens to hundreds of thousands commands a frame.
