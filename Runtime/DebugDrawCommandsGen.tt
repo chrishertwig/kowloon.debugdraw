@@ -1,0 +1,259 @@
+<#@ template debug="false" hostspecific="false" language="C#" #>
+<#@ output extension=".cs" #>
+<#@ assembly name="System.Core" #>
+<#@ import namespace="System.Collections.Generic" #>
+<#@ import namespace="System.Text" #>
+<#
+    // 1. Define type converters
+            Dictionary<string, TypeConverter> typeConverters = new()
+            {
+                ["Rotation"] = new TypeConverter(
+                    "quaternion",
+                    new List<Conversion>
+                    {
+                        new("quaternion", "quaternion.identity", "rotation"),
+                        new("float3", "float3.zero", "quaternion.LookRotation(normal)")
+                    }
+                    ),
+                ["Color"] = new TypeConverter(
+                    "Color",
+                    new List<Conversion>
+                    {
+                        new("Color", "Color.white", "color"),
+                        new("float3", "Color.white", "new Color(color.x, color.y, color.z)"),
+                        new("float4", "Color.white", "new Color(color.x, color.y, color.z, color.w)")
+                    }
+                    )
+            };
+
+            // 2. Define methods with typed parameters
+            List<MethodDefinition> methods = new()
+            {
+                new MethodDefinition(
+                    "Square",
+                    new List<MethodParameter>
+                    {
+                        new("float3", "center"),
+                        new("Rotation", "rotation", true),
+                        new("float2", "size"),
+                        new("Color", "color", true)
+                    },
+                    @"WriteNextDrawCmd(DrawType.Square, renderMode, lifetime, mask, out GpuNonUniformScale* square);
+                square->Center = center;
+                square->Color = PackColor(color);
+                square->Scale = new float3(size.x, size.y, 1f);
+                square->DepthBias = depthBias;
+                square->Rotation = rotation.value;"
+                    )
+            };
+#>
+using Unity.Burst;
+using Unity.Mathematics;
+using UnityEngine;
+
+namespace Kowloon.DebugDraw
+{
+    public partial struct DebugDrawCommandBuffer
+    {
+        <#= GenerateMethods(typeConverters, methods) #>
+
+        public partial struct ParallelWriter
+        {
+            <#= GenerateMethods(typeConverters, methods) #>
+        }
+    }
+}
+
+<#+
+    private string GenerateMethods(Dictionary<string, TypeConverter> converters, List<MethodDefinition> methods)
+    {
+        StringBuilder output = new();
+        foreach (MethodDefinition method in methods)
+        {
+            List<MethodOverload> overloads = GenerateOverloads(converters, method);
+            foreach (MethodOverload overload in overloads)
+            {
+                output.AppendLine($@"
+        [BurstCompile]
+        public unsafe void {overload.Signature}
+        {{
+            {overload.Conversions}
+            {method.Body}
+        }}");
+            }
+        }
+        return output.ToString();
+    }
+
+    private List<MethodOverload> GenerateOverloads(Dictionary<string, TypeConverter> converters, MethodDefinition method)
+    {
+        List<MethodOverload> overloads = new();
+        List<ParameterVariation> parameters = new();
+
+        foreach (MethodParameter param in method.Parameters)
+        {
+            if (converters.ContainsKey(param.Type))
+            {
+                TypeConverter converter = converters[param.Type];
+                List<ParameterVariation> variations = new();
+
+                foreach (Conversion conversion in converter.Conversions)
+                {
+                    variations.Add(new ParameterVariation(
+                        conversion.SourceType,
+                        param.Name,
+                        param.IsOptional ? $" = {conversion.DefaultValue}" : "",
+                        $"{converter.TargetType} {param.Name} = {conversion.ConversionCode};"
+                        ));
+                }
+
+                if (param.IsOptional)
+                {
+                    variations.Add(new ParameterVariation(
+                        "",
+                        "",
+                        "",
+                        $"{converter.TargetType} {param.Name} = {converters[param.Type].Conversions[0].DefaultValue};"
+                        ));
+                }
+
+                parameters.Add(variations);
+            }
+            else
+            {
+                parameters.Add(new List<ParameterVariation>
+                {
+                    new(
+                        param.Type,
+                        param.Name,
+                        param.IsOptional ? " = default" : "",
+                        ""
+                        )
+                });
+            }
+        }
+
+        // Cartesian product of all parameter variations
+        List<List<ParameterVariation>> combinations = new() { new List<ParameterVariation>() };
+        foreach (ParameterVariation paramVariations in parameters)
+        {
+            List<List<ParameterVariation>> newCombinations = new();
+            foreach (List<ParameterVariation> combination in combinations)
+            {
+                foreach (var variation in paramVariations)
+                {
+                    List<ParameterVariation> newCombination = new(combination);
+                    if (!string.IsNullOrEmpty(variation.Type))
+                        newCombination.Add(variation);
+                    newCombinations.Add(newCombination);
+                }
+            }
+            combinations = newCombinations;
+        }
+
+        foreach (List<ParameterVariation> combination in combinations)
+        {
+            StringBuilder signature = new();
+            StringBuilder conversions = new();
+
+            foreach (ParameterVariation param in combination)
+            {
+                if (signature.Length > 0) signature.Append(", ");
+                signature.Append($"{param.Type} {param.Name}{param.Default}");
+
+                if (!string.IsNullOrEmpty(param.Conversion))
+                    conversions.AppendLine($"            {param.Conversion}");
+            }
+
+            overloads.Add(new MethodOverload(
+                $"{method.Name}({signature})",
+                conversions.ToString()
+                ));
+        }
+
+        return overloads;
+    }
+
+        // Helper classes
+    private class TypeConverter
+    {
+        public TypeConverter(string targetType, List<Conversion> conversions)
+        {
+            TargetType = targetType;
+            Conversions = conversions;
+        }
+
+        public string TargetType { get; }
+        public List<Conversion> Conversions { get; }
+    }
+
+    private class Conversion
+    {
+        public Conversion(string sourceType, string defaultValue, string conversionCode)
+        {
+            SourceType = sourceType;
+            DefaultValue = defaultValue;
+            ConversionCode = conversionCode;
+        }
+
+        public string SourceType { get; }
+        public string DefaultValue { get; }
+        public string ConversionCode { get; }
+    }
+
+    private class MethodDefinition
+    {
+        public MethodDefinition(string name, List<MethodParameter> parameters, string body)
+        {
+            Name = name;
+            Parameters = parameters;
+            Body = body;
+        }
+
+        public string Name { get; }
+        public List<MethodParameter> Parameters { get; }
+        public string Body { get; }
+    }
+
+    private class MethodParameter
+    {
+        public MethodParameter(string type, string name, bool isOptional = false)
+        {
+            Type = type;
+            Name = name;
+            IsOptional = isOptional;
+        }
+
+        public string Type { get; }
+        public string Name { get; }
+        public bool IsOptional { get; }
+    }
+
+    private class ParameterVariation
+    {
+        public ParameterVariation(string type, string name, string defaultVal, string conversion)
+        {
+            Type = type;
+            Name = name;
+            Default = defaultVal;
+            Conversion = conversion;
+        }
+
+        public string Type { get; }
+        public string Name { get; }
+        public string Default { get; }
+        public string Conversion { get; }
+    }
+
+    private class MethodOverload
+    {
+        public MethodOverload(string signature, string conversions)
+        {
+            Signature = signature;
+            Conversions = conversions;
+        }
+
+        public string Signature { get; }
+        public string Conversions { get; }
+    }
+#>
